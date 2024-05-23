@@ -16,30 +16,34 @@ Two CP clusters (ZK+Broker+SR+C3) are running:
 
 *  Left Control Center available at [http://localhost:19021](http://localhost:19021/)
 *  Right Control Center available at [http://localhost:29021](http://localhost:29021/)
+*  Center Control Center available at [http://localhost:39021](http://localhost:39021/)
 *  Left Schema Register available at [http://localhost:8085](http://localhost:8085/)
 *  Right Schema Register available at [http://localhost:8086](http://localhost:8086/)
+*  Center Schema Register available at [http://localhost:8087](http://localhost:8087/)
 
-## Create the topic `number` and the schema `product-value` in the both clusters
+## Create the topic `test` skipping the schema registry setup to keep it simple
 
 ```shell
 #curl -v -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" --data @data/product.avsc http://localhost:8085/subjects/product-value/versions
 
 #curl -v -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" --data @data/product.avsc http://localhost:8086/subjects/product-value/versions  
 
-docker compose exec leftKafka kafka-topics --bootstrap-server leftKafka:19092 --topic number --create --partitions 3 --replication-factor 1
+docker compose exec leftKafka kafka-topics --bootstrap-server leftKafka:19092 --topic test --create --partitions 1 --replication-factor 1
 
-docker compose exec rightKafka kafka-topics --bootstrap-server rightKafka:29092 --topic number --create --partitions 3 --replication-factor 1
+docker compose exec centerKafka kafka-topics --bootstrap-server centerKafka:39092 --topic test --create --partitions 1 --replication-factor 1
+
+docker compose exec rightKafka kafka-topics --bootstrap-server rightKafka:29092 --topic test --create --partitions 1 --replication-factor 1
 ```
 
-## Create the schema linking
+## Create the schema linking skipping the schema registry setup to keep it simple 
 
 ### Create schema linking from left to right
 
 ```shell
-docker compose exec leftSchemaregistry bash -c '\
+#docker compose exec leftSchemaregistry bash -c '\
     echo "schema.registry.url=http://rightSchemaregistry:8086" > /home/appuser/config.txt'
     
-docker compose exec leftSchemaregistry bash -c '\
+#docker compose exec leftSchemaregistry bash -c '\
     schema-exporter --create --name left-to-right-sl --subjects "product-value" \
     --config-file ~/config.txt \
     --schema.registry.url http://leftSchemaregistry:8085 \
@@ -50,10 +54,10 @@ docker compose exec leftSchemaregistry bash -c '\
 ### Create schema linking from right to left
 
 ```shell
-docker compose exec rightSchemaregistry bash -c '\
+#docker compose exec rightSchemaregistry bash -c '\
     echo "schema.registry.url=http://leftSchemaregistry:8085" > /home/appuser/config.txt'
 
-docker compose exec rightSchemaregistry bash -c '\
+#docker compose exec rightSchemaregistry bash -c '\
     schema-exporter --create --name right-to-left-sl --subjects "product-value" \
     --config-file ~/config.txt \
     --schema.registry.url http://rightSchemaregistry:8086 \
@@ -72,6 +76,7 @@ bootstrap.servers=leftKafka:19092
 link.mode=BIDIRECTIONAL
 cluster.link.prefix=left.
 consumer.offset.sync.enable=true
+consumer.offset.sync.ms=1000
 " > /home/appuser/cl.properties'
 
 docker compose exec rightKafka bash -c '\
@@ -79,10 +84,89 @@ echo "{\"groupFilters\": [{\"name\": \"*\",\"patternType\": \"LITERAL\",\"filter
 
 docker compose exec rightKafka \
     kafka-cluster-links --bootstrap-server rightKafka:29092 \
-    --create --link bidirectional-link \
+    --create --link bidirectional-linkAC \
     --config-file /home/appuser/cl.properties \
     --consumer-group-filters-json-file /home/appuser/cl-offset-groups.json
-``` 
+```
+
+**# Create cluster linking from left to center**
+```shell
+docker compose exec centerKafka bash -c '\
+echo "\
+bootstrap.servers=leftKafka:19092
+link.mode=BIDIRECTIONAL
+cluster.link.prefix=left.
+consumer.offset.sync.enable=true
+consumer.offset.sync.ms=1000
+" > /home/appuser/cl.properties'
+
+docker compose exec centerKafka bash -c '\
+echo "{\"groupFilters\": [{\"name\": \"*\",\"patternType\": \"LITERAL\",\"filterType\": \"INCLUDE\"}]}" > /home/appuser/cl-offset-groups.json'
+
+docker compose exec centerKafka \
+    kafka-cluster-links --bootstrap-server centerKafka:39092 \
+    --create --link bidirectional-linkAB \
+    --config-file /home/appuser/cl.properties \
+    --consumer-group-filters-json-file /home/appuser/cl-offset-groups.json
+```
+
+**# Create cluster linking from right to left**
+```shell
+docker compose exec leftKafka bash -c '\
+echo "\
+bootstrap.servers=rightKafka:29092
+link.mode=BIDIRECTIONAL
+cluster.link.prefix=right.
+consumer.offset.sync.enable=true
+consumer.offset.sync.ms=1000
+" > /home/appuser/cl1.properties'
+docker compose exec leftKafka bash -c '\
+echo "{\"groupFilters\": [{\"name\": \"*\",\"patternType\": \"LITERAL\",\"filterType\": \"INCLUDE\"}]}" > /home/appuser/cl1-offset-groups.json'
+docker compose exec leftKafka \
+    kafka-cluster-links --bootstrap-server leftKafka:19092 \
+    --create --link bidirectional-linkAC \
+    --config-file /home/appuser/cl1.properties \
+    --consumer-group-filters-json-file /home/appuser/cl1-offset-groups.json
+```
+
+**# Create cluster linking from center to left**
+```shell
+docker compose exec leftKafka bash -c '\
+echo "\
+bootstrap.servers=centerKafka:39092
+link.mode=BIDIRECTIONAL
+cluster.link.prefix=center.
+consumer.offset.sync.enable=true
+consumer.offset.sync.ms=1000
+" > /home/appuser/cl2.properties'
+
+docker compose exec leftKafka bash -c '\
+echo "{\"groupFilters\": [{\"name\": \"*\",\"patternType\": \"LITERAL\",\"filterType\": \"INCLUDE\"}]}" > /home/appuser/cl2-offset-groups.json'
+
+docker compose exec leftKafka \
+    kafka-cluster-links --bootstrap-server leftKafka:19092 \
+    --create --link bidirectional-linkAB \
+    --config-file /home/appuser/cl2.properties \
+    --consumer-group-filters-json-file /home/appuser/cl2-offset-groups.json
+```shell
+
+**check for link**
+
+docker compose exec leftKafka \
+ kafka-cluster-links --bootstrap-server leftKafka:19092  --list
+docker compose exec rightKafka \
+    kafka-cluster-links --bootstrap-server rightKafka:29092 --list
+docker compose exec centerKafka \
+    kafka-cluster-links --bootstrap-server centerKafka:39092 --list
+
+
+docker compose exec leftKafka \
+ kafka-cluster-links --bootstrap-server leftKafka:19092  --list
+docker compose exec rightKafka \
+    kafka-cluster-links --bootstrap-server rightKafka:29092 --list
+docker compose exec centerKafka \
+    kafka-cluster-links --bootstrap-server centerKafka:39092 --list
+
 
 Create the mirror topic
 
